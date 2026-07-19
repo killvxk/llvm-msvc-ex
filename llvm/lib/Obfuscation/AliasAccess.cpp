@@ -59,6 +59,8 @@ PreservedAnalyses AliasAccess::run(Module &M, ModuleAnalysisManager &AM) {
   static_assert(BRANCH_NUM > 1);
   srand(time(NULL));
   for (Function &F : M) {
+    if (F.hasPersonalityFn())
+      continue;
     if (readAnnotate(&F).find("alias-access") != std::string::npos) {
       process(F);
     }

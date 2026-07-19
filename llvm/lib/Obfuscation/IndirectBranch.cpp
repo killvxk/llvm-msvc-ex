@@ -50,6 +50,8 @@ struct IndirectBlockInfo {
 
 PreservedAnalyses IndirectBranch::run(Function &F,
                                       FunctionAnalysisManager &AM) {
+  if (F.hasPersonalityFn())
+    return PreservedAnalyses::all();
   if (readAnnotate(&F).find("ind-br") != std::string::npos) {
     process(F);
     return PreservedAnalyses::none();

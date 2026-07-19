@@ -137,6 +137,9 @@ PreservedAnalyses EasyCfgPass::run(Module &M, ModuleAnalysisManager &AM) {
         //errs()<<"decl\n";
         continue;
       }
+      if (F.hasPersonalityFn()) {
+        continue;
+      }
       
       if(toObfuscate(RunEasyCfg, &F, "x-cfg")){
         
