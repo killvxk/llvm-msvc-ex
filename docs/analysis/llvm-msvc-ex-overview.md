@@ -136,7 +136,7 @@ msbuild /m -p:Configuration=release INSTALL.vcxproj
 
 辅助与公共件：`MBAMatrix`（195 行，`namespace ollvm` 线性矩阵化简器，`MBAMatrix.cpp:10` `simplify()`，无门控）；`Utils.cpp`（307 行，`toObfuscate :113-160`、`readAnnotate`、`fixStack`、`INIT_CONTEXT/TYPE_I32/CONST_I32/RANDOM` 宏 `Utils.h:8-17`）；`CryptoUtils.cpp`（1154 行，AES-CTR PRNG + SHA256 改编自 libtomcrypt `CryptoUtils.h:11-13`，全局单例 `cryptoutils` `CryptoUtils.h:34`，`-aesSeed` 固定种子 `CryptoUtils.cpp:52`，Windows 走 `WinDevRandom` `:628`）；`Plugin.cpp`（99 行，§4.1）。
 
-门控三态归纳：toObfuscate 型 16 个；纯 flag 型 6 个（GlobalsEncryption/Linearize/VariableRotation/VmObfuscatorPass/CodePicPass + CombineFunctions 主门）；注解独占型 3 个（IndirectBranch/AliasAccess/CustomCC，`no<attr>` 同样可关）。
+门控三态归纳（实测更正：xvmPass 的 `-x-vm` 旗标在源码 `xVMProtect.cpp:1076` 被硬编码 `toObfuscate(false,...)` 绕过，实为注解独占型，归 16→15 + 注解独占 3→4）；toObfuscate 型 15 个；纯 flag 型 6 个（GlobalsEncryption/Linearize/VariableRotation/VmObfuscatorPass/CodePicPass + CombineFunctions 主门）；注解独占型 4 个（IndirectBranch/AliasAccess/CustomCC/Xvm，`no<attr>` 同样可关）。
 
 ## 5. 数据流：源码 → flags → IR passes → 后端/LTO
 
