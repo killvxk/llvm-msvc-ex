@@ -46,6 +46,8 @@ install/
 /GTAGS
 /ID
 /.github
+/.omc
+/.omp
 /.ci
 .gitusers
 autom4te.cache
