@@ -168,8 +168,12 @@ Value *buildLinearMBA(BinaryOperator *OriginalInsn,
   IRBuilder<> IRB(OriginalInsn);
   std::shuffle(Terms.begin(), Terms.end(),
                std::mt19937{std::random_device{}()});
-  bool NSW = OriginalInsn->hasNoSignedWrap();
-  bool NUW = OriginalInsn->hasNoUnsignedWrap();
+  // FIX: do NOT propagate the original instruction's NSW/NUW flags to the
+  // MBA expression. The boolean-algebra identity holds mod 2^n, but
+  // intermediate terms (coefficient × boolean-term) can wrap even when the
+  // original addition did not. False no-wrap assertions let the optimizer
+  // fold under non-overflow assumptions → wrong values → downstream crashes.
+  (void)OriginalInsn;
   Value *X = OriginalInsn->getOperand(0), *Y = OriginalInsn->getOperand(1);
   Value *Expr = nullptr;
   for (LinearMBATerm &Term : Terms) {
@@ -183,9 +187,9 @@ Value *buildLinearMBA(BinaryOperator *OriginalInsn,
       TermVal = ConstantInt::getSigned(X->getType(), -1);
     }
     Value *Mul = ConstantInt::getSigned(X->getType(), Term.Coefficient);
-    TermVal = IRB.CreateMul(Mul, TermVal, "", NUW, NSW);
+    TermVal = IRB.CreateMul(Mul, TermVal);
     if (Expr != nullptr) {
-      Expr = IRB.CreateAdd(Expr, TermVal, "", NUW, NSW);
+      Expr = IRB.CreateAdd(Expr, TermVal);
     } else {
       Expr = TermVal;
     }
