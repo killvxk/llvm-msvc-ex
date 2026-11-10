@@ -109,10 +109,12 @@ Function *VariableRotation::createRotateFunc(Module *m, PointerType *ptrType,
   // 外部循环
   builder.SetInsertPoint(outerLoopBB);
   builder.CreateStore(builder.getInt32(0), jAlloca); // 初始j=0
-  Value *firstElement =
-      builder.CreateLoad(ptrType, a1, "firstElement");
+  // FIX(opaque-ptr): ptrType is a PointerType (just 'ptr' under opaque
+  // pointers); loading with it as the type loads a *pointer* value from
+  // the i8 buffer, then truncating a pointer to i8 is invalid IR.
+  // The rotate function operates on bytes — load an i8 directly.
   Value *firstByte =
-      builder.CreateTrunc(firstElement, builder.getInt8Ty(), "firstByte");
+      builder.CreateLoad(builder.getInt8Ty(), a1, "firstByte");
   builder.CreateBr(innerLoopBB);
 
   // 内部循环
@@ -161,9 +163,42 @@ void VariableRotation::processFunction(Function &f,
     for (Instruction &instr : bb)
       if (isa<AllocaInst>(instr)) {
         auto a = (AllocaInst *)(&instr);
-        list.insert(a);
+        // PORT-OBF: only rotate pure scalar allocas (single IntegerType,
+        // FloatingPointType, or PointerType). Arrays, structs, and vectors
+        // are skipped: GEP+variable-index arrays produce wrong results
+        // under rotation (seed-dependent); structs may contain padding
+        // that breaks byte-level rotation; vectors have SIMD alignment
+        // requirements that rotation can violate.
+        Type *AT = a->getAllocatedType();
+        if (!isa<IntegerType>(AT))
+          continue;
+        // PORT-OBF: skip allocas whose address escapes to a function call.
+        // The byte-rotate buffer garbles data when library functions
+        // (snprintf, printf, memcpy...) read/write through the rotated
+        // pointer. Only rotate allocas used exclusively by direct
+        // load/store instructions.
+        bool escapes = false;
+        for (User *U : a->users()) {
+          if (auto *CI = dyn_cast<CallInst>(U)) {
+            escapes = true;
+            break;
+          }
+          // GEP through the alloca then passed to a call also escapes
+          if (auto *GEP = dyn_cast<GetElementPtrInst>(U)) {
+            for (User *GU : GEP->users()) {
+              if (isa<CallInst>(GU)) {
+                escapes = true;
+                break;
+              }
+            }
+            if (escapes)
+              break;
+          }
+        }
+        if (!escapes)
+          list.insert(a);
       }
-  if (processVars(f, list, shift[0])) {
+  if (list.size() >= 2 && processVars(f, list, shift[0])) {
     for (AllocaInst *a : list)
       a->eraseFromParent();
   }
@@ -173,48 +208,62 @@ bool VariableRotation::processVars(Function &f, SetVector<AllocaInst *> &vars,
                                    Function *rotateFunc) {
   if (vars.size() < 2)
     return false;
+
   IRBuilder<> irb(&*f.getEntryBlock().getFirstInsertionPt());
   Value *zero = ConstantInt::get(irb.getInt32Ty(), 0);
   const auto data = f.getParent()->getDataLayout();
-  int space = 0;
-  SetVector<int> value_map;
-  //printf("function: %s\n", f.getName().str().c_str());
-  for (const auto a : vars) {
-    value_map.insert(space);
-    //printf("address:  %d\n", space);
-    space += data.getTypeAllocSize(a->getAllocatedType());
-  }
-  ArrayType *array_type = ArrayType::get(irb.getInt8Ty(), space);
+
+  const int n = vars.size();
+
+  // PORT-OBF: slot-aligned rotation. Each variable occupies one slot of
+  // slot_size bytes (the max allocation size across all variables). The
+  // rotation delta is always a multiple of slot_size, so multi-byte
+  // variables stay contiguous within their slot during rotation. The
+  // original byte-level rotation scattered multi-byte variables across
+  // the array boundary (4-byte int split 2+2 at wrap-around) -> garbage.
+  uint64_t slot_size = 0;
+  for (const auto a : vars)
+    slot_size = std::max(slot_size,
+                         (uint64_t)data.getTypeAllocSize(a->getAllocatedType()));
+  const uint64_t total = (uint64_t)n * slot_size;
+
+  ArrayType *array_type = ArrayType::get(irb.getInt8Ty(), total);
   AllocaInst *array = irb.CreateAlloca(array_type);
+
   for (BasicBlock &bb : f) {
-    int offset = 0;
+    int offset = 0; // in SLOTS
     auto iter = bb.getFirstInsertionPt();
-    if (&bb == &f.getEntryBlock())
-      ++iter;
+    // FIX: do NOT skip an extra instruction in the entry block.
+    // getFirstInsertionPt() already skips PHIs and allocas (including our
+    // byte-array alloca above). The old ++iter skipped the FIRST REAL
+    // instruction — typically a variable initialization store — which then
+    // wrote to the original alloca (later erased) instead of the rotated
+    // array, so the initial value was lost.
     while (iter != bb.end()) {
       Instruction *inst = &*iter;
       irb.SetInsertPoint(inst);
-      for (int i = 0; i < vars.size(); i++)
+      // FIX: replace ALL rotated variables used by this instruction, not
+      // just the first. The original `break` left subsequent variables
+      // pointing at the original alloca (later erased → dangling pointer).
+      for (int i = 0; i < n; i++)
         if (isUsedByInst(inst, vars[i])) {
           if (constexpr int prob = 50;
               cryptoutils->get_uint32_t() % 100 < prob) {
             const int times =
-                cryptoutils->get_uint32_t() % (vars.size() - 1) + 1;
-            const int delta =
-                (space + value_map[(offset + times) % vars.size()] -
-                 value_map[offset]) %
-                space;
+                cryptoutils->get_uint32_t() % (n - 1) + 1;
             irb.CreateCall(
                 FunctionCallee(rotateFunc),
                 {irb.CreateGEP(array->getAllocatedType(), array, {zero, zero}),
-                 ConstantInt::get(irb.getInt32Ty(), space),
-                 ConstantInt::get(irb.getInt32Ty(), delta)});
-            offset = (offset + times) % vars.size();
+                 ConstantInt::get(irb.getInt32Ty(), total),
+                 ConstantInt::get(irb.getInt32Ty(),
+                                  (uint64_t)times * slot_size)});
+            offset = (offset + times) % n;
           }
-          const int index = (space + value_map[i] - value_map[offset]) % space;
+          const int slot_index = (n + i - offset) % n;
+          const int byte_offset = (int)(slot_index * slot_size);
           Value *gep =
               irb.CreateGEP(array->getAllocatedType(), array,
-                            {zero, ConstantInt::get(irb.getInt32Ty(), index)});
+                            {zero, ConstantInt::get(irb.getInt32Ty(), byte_offset)});
           Value *cast = irb.CreateBitOrPointerCast(gep, vars[i]->getType());
           int c = 0;
           for (const Value *ops : inst->operands()) {
@@ -222,7 +271,7 @@ bool VariableRotation::processVars(Function &f, SetVector<AllocaInst *> &vars,
               inst->setOperand(c, cast);
             c++;
           }
-          break;
+          // NO break — continue to replace other rotated vars in this inst
         }
       ++iter;
     }
@@ -231,9 +280,9 @@ bool VariableRotation::processVars(Function &f, SetVector<AllocaInst *> &vars,
       irb.CreateCall(
           FunctionCallee(rotateFunc),
           {irb.CreateGEP(array->getAllocatedType(), array, {zero, zero}),
-           ConstantInt::get(irb.getInt32Ty(), space),
+           ConstantInt::get(irb.getInt32Ty(), total),
            ConstantInt::get(irb.getInt32Ty(),
-                            (space - value_map[offset]) % space)});
+                            (uint64_t)(n - offset) * slot_size)});
     }
   }
   return true;
@@ -261,9 +310,7 @@ bool VariableRotation::runOnModule(Module &m) {
   for (Function &f : m) {
 
     if (&f == shiftFunc)
-
       continue;
-
     if (f.hasExactDefinition())
 
       processFunction(f, shifts);

@@ -89,6 +89,22 @@ public:
     // Check if already exists
     if (auto *F = M.getFunction("vm_exec")) {
       if (!F->empty()) return F;  // Already has body
+      // PORT-OBF: adopt the pre-inserted empty declaration (created by
+      // FuncRedirector's getOrInsertFunction) instead of Create()ing a
+      // colliding "vm_exec" that LLVM renames to vm_exec.N — the leftover
+      // declaration then reached the object file as an unreferenced
+      // undefined external symbol, which NeverC's linker rejects
+      // ("undefined symbol: vm_exec"). Adopting fills the declaration in
+      // place, so the name stays vm_exec and nothing vestigial survives.
+      F->setLinkage(llvm::GlobalValue::InternalLinkage);
+      F->setDoesNotThrow();
+      auto AI = F->arg_begin();
+      llvm::Argument *ArgCode = &*AI++; ArgCode->setName("code");
+      llvm::Argument *ArgSize = &*AI++; ArgSize->setName("size");
+      llvm::Argument *ArgArgs = &*AI++; ArgArgs->setName("args");
+      llvm::Argument *ArgNum = &*AI++;  ArgNum->setName("num");
+      generateBody(F, ArgCode, ArgSize, ArgArgs, ArgNum);
+      return F;
     }
 
     // Create function with InternalLinkage

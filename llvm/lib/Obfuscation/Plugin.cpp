@@ -34,12 +34,22 @@ llvm::PassPluginLibraryInfo getObfuscationPluginInfo() {
   return {
       LLVM_PLUGIN_API_VERSION, "Obfuscation", LLVM_VERSION_STRING,
       [](PassBuilder &PB) {
+        // PORT-OBF: the source fork accepted ANY pipeline name here and
+        // returned true, which hijacks every named-pipeline resolution.
+        // NeverC's linker parses named pipelines (parsePassPipeline in
+        // CommonLTOConfig), so the callbacks now only claim "code-pic" and
+        // leave all other names to the native registry. CodePicPass remains
+        // available through the PipelineStart EP registration (-mllvm -x-pic).
         PB.registerPipelineParsingCallback([](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
+          if (Name != "code-pic")
+            return false;
           MPM.addPass(CodePicPass());
           return true;
         });
         PB.registerPipelineParsingCallback(
                 [](StringRef Name, FunctionPassManager &FPM, ArrayRef<PassBuilder::PipelineElement>) {
+                  if (Name != "code-pic")
+                    return false;
                   FPM.addPass(CodePicPass());
                   return true;
                 });
