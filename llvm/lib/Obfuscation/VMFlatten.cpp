@@ -430,16 +430,25 @@ bool VMFlat::DoFlatten(Function *f) {
       IRB.CreateAdd(IRB.CreateLoad(vm_pc->getAllocatedType(), vm_pc),
                     ConstantInt::get(type_int_ty, 2));
 
+  // FIX(opaque-ptr): the opcode array holds integer VM opcodes ([N x i64/i32]).
+  // Loading with gep->getType() under opaque pointers loads a *pointer*
+  // (`load ptr`), which then feeds SwitchInst as a pointer condition —
+  // invalid IR that bitcode readers reject ("Invalid record") and the
+  // textual parser refuses ("switch condition must have integer type").
+  // Latent since opaque pointers became mandatory; first exposed by the
+  // NeverC port's embedded-bitcode link path. Load the array element type
+  // instead, matching the switch-case constants below.
+  Type *op_elem_ty = oparr_var->getValueType()->getArrayElementType();
   auto optype_gep =
       IRB.CreateGEP(oparr_var->getValueType(), oparr_var,
                     {zero, IRB.CreateLoad(vm_pc->getAllocatedType(), vm_pc)});
-  Value *optype = IRB.CreateLoad(optype_gep->getType(), optype_gep);
+  Value *optype = IRB.CreateLoad(op_elem_ty, optype_gep);
   auto op1_gep =
       IRB.CreateGEP(oparr_var->getValueType(), oparr_var, {zero, op1_offset});
-  Value *op1 = IRB.CreateLoad(op1_gep->getType(), op1_gep);
+  Value *op1 = IRB.CreateLoad(op_elem_ty, op1_gep);
   auto op2_gep =
       IRB.CreateGEP(oparr_var->getValueType(), oparr_var, {zero, op2_offset});
-  Value *op2 = IRB.CreateLoad(op2_gep->getType(), op2_gep);
+  Value *op2 = IRB.CreateLoad(op_elem_ty, op2_gep);
 
   IRB.CreateStore(
       IRB.CreateAdd(IRB.CreateLoad(vm_pc->getAllocatedType(), vm_pc),
